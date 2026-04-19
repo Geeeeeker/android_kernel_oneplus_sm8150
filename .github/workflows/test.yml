@@ -1,0 +1,126 @@
+name: Build kernelsu-susfs
+on:
+  workflow_dispatch:
+    inputs:
+      codename:
+        required: true
+        type: string
+        default: 'lineage_raphael'
+      repo:
+        required: true
+        type: string
+        default: 'android_kernel_xiaomi_sm8150_419'
+
+jobs:
+  build-kernelsu-susfs:
+    runs-on: ubuntu-latest
+    env:
+      # General Build Environment
+      CCACHE_MAXSIZE: "2G"
+      GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+
+      # Kernel & Device Configuration
+      KERNEL_SOURCE: "https://github.com/Geeeeeker/${{ inputs.repo }}"
+      KERNEL_BRANCH: "lineage-23.0_raphael"
+      KERNEL_VERSION: "4.14"
+      KERNEL_DEFCONFIG: "vendor/sm8150-perf_defconfig"
+      DEVICE_CODENAME: "raphael"
+      KERNEL_DIR: "device_kernel"
+
+      # KernelSU Configuration
+      KERNELSU_SOURCE: "https://github.com/tiann/KernelSU.git"
+      KERNELSU_BRANCH: "main"
+      
+      # SUSFS Configuration
+      SUSFS_ENABLE: "true"
+      SUSFS_SOURCE: "https://gitlab.com/simonpunk/susfs4ksu.git"
+      SUSFS_BRANCH: "kernel-4.14"
+
+      # AnyKernel3 Configuration
+      AK3_SOURCE: "https://github.com/ayuschatterjee/AnyKernel3"
+      AK3_BRANCH: "master"
+
+      # Toolchain (Clang from LineageOS prebuilts)
+      CLANG_SOURCE: "https://github.com/LineageOS/android_prebuilts_clang_host_linux-x86"
+      CLANG_BRANCH: "lineage-22.1"   # Contains clang-r510928 (version 17.x)
+      CLANG_DIR: "clang-prebuilt"
+      
+    steps:                               
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential ccache cpio curl flex git git-lfs \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi libssl-dev libelf-dev \
+            device-tree-compiler python3 unzip xz-utils zlib1g-dev
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: build-kernel-${{ env.DEVICE_CODENAME }}
+          max-size: ${{ env.CCACHE_MAXSIZE }}
+
+      - name: Clone Kernel Source and Dependencies
+        run: |
+          git clone --depth=1 --branch ${{ env.KERNEL_BRANCH }} ${{ env.KERNEL_SOURCE }} ${{ env.KERNEL_DIR }}
+          git clone --depth=1 --branch ${{ env.AK3_BRANCH }} ${{ env.AK3_SOURCE }} AnyKernel3
+          git clone --depth=1 --branch ${{ env.KERNELSU_BRANCH }} ${{ env.KERNELSU_SOURCE }} KernelSU
+          if [[ "${{ env.SUSFS_ENABLE }}" == "true" ]]; then
+            git clone --depth=1 --branch ${{ env.SUSFS_BRANCH }} ${{ env.SUSFS_SOURCE }} susfs4ksu
+          fi
+          # Clone Clang toolchain
+          git clone --depth=1 --branch ${{ env.CLANG_BRANCH }} ${{ env.CLANG_SOURCE }} ${{ env.CLANG_DIR }}
+
+      - name: Integrate KernelSU and SUSFS
+        working-directory: ./${{ env.KERNEL_DIR }}
+        run: |
+          ln -sf ../KernelSU/kernel ./drivers/kernelsu
+          echo "obj-\$(CONFIG_KSU) += kernelsu/" >> drivers/Makefile
+          sed -i '/endmenu/i\source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+          echo "CONFIG_KSU=y" >> arch/arm64/configs/${{ env.KERNEL_DEFCONFIG }}
+          if [[ "${{ env.SUSFS_ENABLE }}" == "true" ]]; then
+            echo "CONFIG_KSU_SUSFS=y" >> arch/arm64/configs/${{ env.KERNEL_DEFCONFIG }}
+          fi
+
+      - name: Apply SUSFS Patches
+        if: env.SUSFS_ENABLE == 'true'
+        run: |
+          cd ./${{ env.KERNEL_DIR }}
+          cp ../susfs4ksu/kernel_patches/fs/* fs/
+          cp ../susfs4ksu/kernel_patches/include/linux/* include/linux/
+          cp ../susfs4ksu/kernel_patches/50_add_susfs_in_kernel-${{ env.KERNEL_VERSION }}.patch ./
+          patch -p1 < 50_add_susfs_in_kernel-${{ env.KERNEL_VERSION }}.patch || true
+          
+          cd ../KernelSU/
+          cp ../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./
+          patch -p1 < 10_enable_susfs_for_ksu.patch || true
+
+      - name: Build the Kernel
+        working-directory: ./${{ env.KERNEL_DIR }}
+        run: |
+          export ARCH=arm64
+          export CLANG_PREBUILT_BIN=$(realpath ../${{ env.CLANG_DIR }}/clang-r510928/bin)
+          export PATH="${CLANG_PREBUILT_BIN}:${PATH}"
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          export CC="ccache clang"
+          
+          make O=out ${{ env.KERNEL_DEFCONFIG }}
+          make O=out -j$(nproc --all) LD=ld.lld
+          
+          cp out/arch/arm64/boot/Image ../AnyKernel3/
+
+      - name: Package Kernel into Flashable Zip
+        working-directory: ./AnyKernel3
+        run: |
+          KSU_VER=$(cd ../KernelSU && git rev-parse --short HEAD)
+          ZIP_NAME="Kernel-sm8150-raphael-KSU-${KSU_VER}-$(date +%Y%m%d).zip"
+          zip -r9 "../${ZIP_NAME}" *
+          echo "OUTPUT_ZIP=${ZIP_NAME}" >> $GITHUB_ENV
+          echo "Created kernel zip: ${ZIP_NAME}"
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.OUTPUT_ZIP }}
