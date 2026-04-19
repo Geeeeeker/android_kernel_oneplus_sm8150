@@ -1,4 +1,4 @@
-name: Build kernelsu-susfs
+name: Build kernelsu-susfs！
 on:
   workflow_dispatch:
     inputs:
@@ -39,11 +39,6 @@ jobs:
       # AnyKernel3 Configuration
       AK3_SOURCE: "https://github.com/ayuschatterjee/AnyKernel3"
       AK3_BRANCH: "master"
-
-      # Toolchain (Clang from LineageOS prebuilts)
-      CLANG_SOURCE: "https://github.com/LineageOS/android_prebuilts_clang_host_linux-x86"
-      CLANG_BRANCH: "lineage-22.1"   # Contains clang-r510928 (version 17.x)
-      CLANG_DIR: "clang-prebuilt"
       
     steps:                               
       - name: Install Dependencies
@@ -52,7 +47,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             bc bison build-essential ccache cpio curl flex git git-lfs \
             gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi libssl-dev libelf-dev \
-            device-tree-compiler python3 unzip xz-utils zlib1g-dev
+            clang llvm lld device-tree-compiler python3 unzip xz-utils zlib1g-dev
 
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
@@ -68,8 +63,6 @@ jobs:
           if [[ "${{ env.SUSFS_ENABLE }}" == "true" ]]; then
             git clone --depth=1 --branch ${{ env.SUSFS_BRANCH }} ${{ env.SUSFS_SOURCE }} susfs4ksu
           fi
-          # Clone Clang toolchain
-          git clone --depth=1 --branch ${{ env.CLANG_BRANCH }} ${{ env.CLANG_SOURCE }} ${{ env.CLANG_DIR }}
 
       - name: Integrate KernelSU and SUSFS
         working-directory: ./${{ env.KERNEL_DIR }}
@@ -99,15 +92,12 @@ jobs:
         working-directory: ./${{ env.KERNEL_DIR }}
         run: |
           export ARCH=arm64
-          export CLANG_PREBUILT_BIN=$(realpath ../${{ env.CLANG_DIR }}/clang-r510928/bin)
-          export PATH="${CLANG_PREBUILT_BIN}:${PATH}"
           export CLANG_TRIPLE=aarch64-linux-gnu-
           export CROSS_COMPILE=aarch64-linux-gnu-
-          export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-          export CC="ccache clang"
+          export LLVM=1
           
-          make O=out ${{ env.KERNEL_DEFCONFIG }}
-          make O=out -j$(nproc --all) LD=ld.lld
+          make O=out ${{ env.KERNEL_DEFCONFIG }} CC="ccache clang"
+          make O=out -j$(nproc --all) CC="ccache clang" LD=ld.lld
           
           cp out/arch/arm64/boot/Image ../AnyKernel3/
 
